@@ -1,0 +1,50 @@
+# 忽略所有 .DS_Store 文件（macOS）
+.DS_Store
+
+# 忽略 Python 编译文件
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# 忽略虚拟环境
+venv/
+env/
+
+# 忽略 Jupyter Notebook 检查点
+.ipynb_checkpoints/
+
+# 忽略日志文件
+*.log
+
+# 忽略 VS Code 工作区文件
+.vscode/
+
+# 忽略 Node.js 依赖
+node_modules/
+
+# 忽略 R 包管理工具生成的文件
+renv/
+packrat/
+
+# 忽略本地配置文件
+.env
+.config
+
+# 忽略大型数据集
+data/
+datasets/
+
+# 忽略构建输出
+build/
+dist/
+out/
+
+softlink        # 软连接不算目录，不加斜杠
+softlink/
+
+# 忽略输出
+eval_output/
+outputs/
+hotmap/
+test/
