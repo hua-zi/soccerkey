@@ -143,7 +143,8 @@ def load_svbench_json(json_file):
         return json_data["QA_pairs"]
     return json_data
 
-def build_svbench_eval(args, task_name):
+def build_svbench_eval(args, task_name, done_ids=None):
+    done_ids = done_ids or set()
     data_list = []
     # for task_name, task in tasks.items():
     task = tasks[task_name]
@@ -156,6 +157,8 @@ def build_svbench_eval(args, task_name):
     for i, data in enumerate(json_data):
         # if i == 3:
         #     break
+        if data.get('video_name') in done_ids:
+            continue
         data_list.append({
             'task_type': task_name,
             'prefix': vis_folder,
@@ -167,6 +170,29 @@ def build_svbench_eval(args, task_name):
     dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers, collate_fn=collate_fn)
 
     return dataloader
+
+
+def load_done_ids(output_file):
+    done_ids = set()
+    if not output_file or not os.path.exists(output_file):
+        return done_ids
+
+    with open(output_file, 'r', encoding='utf-8') as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                item = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if item.get('id'):
+                done_ids.add(item['id'])
+    return done_ids
+
+
+def clean_option_prefix(output):
+    return re.sub(r'^\s*\(O\d+\)\s*', '', output).strip()
 
 
 def load_include_frame_idx(args, keyframe_mode, nframes=32):
@@ -192,18 +218,22 @@ def load_include_frame_idx(args, keyframe_mode, nframes=32):
 def run_inference(args):
     setup_seed(43)
     disable_torch_init()
+
+    answer_file = os.path.expanduser(args.output_file)
+    done_ids = load_done_ids(answer_file) if args.resume else set()
+    if done_ids:
+        print(f'Resume enabled, skip {len(done_ids)} finished samples.')
     
     # 数据和模型
-    val_loader = build_svbench_eval(args, args.task_name)
+    val_loader = build_svbench_eval(args, args.task_name, done_ids=done_ids)
     model, processor = model_init(args.model_path)
 
     # 抽帧
     include_frame_idx = load_include_frame_idx(args, keyframe_mode=args.keyframe_mode, nframes=args.nframes)
 
     # save answer
-    answer_file = os.path.expanduser(args.output_file)
     os.makedirs(os.path.dirname(args.output_file), exist_ok=True)
-    ans_file = open(answer_file, "w")
+    ans_file = open(answer_file, "a" if args.resume else "w", encoding='utf-8')
     
     # NOTE: only support batch size 1 for now
     for i, (messages, questions, question_ids, answers) in enumerate(tqdm(val_loader)):
@@ -226,13 +256,12 @@ def run_inference(args):
             frame_idx=include_frame_idx[question_id] if include_frame_idx is not None else None,
             nframes=len(include_frame_idx[question_id]) if include_frame_idx is not None else args.nframes,
         )
-        # print(output)
-        if output.find(')') > -1:
-            output = output[output.index(')') + 1:].strip()
+        output = clean_option_prefix(output)
         clean_cache(model)
         # import ipdb; ipdb.set_trace()
         ans_file.write(json.dumps({'id': question_id, 'question': question, 'answer': answer, 'pred': output}) + '\n')
-        # if i == 10:
+        ans_file.flush()
+        # if i == 2:
         #     break
     ans_file.close()
 
@@ -248,6 +277,7 @@ if __name__ == "__main__":
     parser.add_argument("--device", type=str, required=False, default='cuda:0')
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--num-workers", type=int, default=2)
+    parser.add_argument("--resume", action='store_true', help='Append to output file and skip finished sample ids.')
 
     parser.add_argument("--task-name", type=str, required=True, default='action_classification', choices=list(tasks.keys()))
     parser.add_argument("--keyframe-mode", type=str, required=False, default='Uniform', choices=['ASK', 'FOCUS', 'KFC', 'KFCblip2', 'Uniform'])

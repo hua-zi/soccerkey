@@ -12,7 +12,7 @@ keyframe_mode=Uniform
 mkdir -p "${OUTPUT_DIR}"
 
 echo '-----------' >> "${OUTPUT_DIR}/${logname}"
-# for task_name in action_classification commentary_generation fouls_penalties offside_judgement player_identification space_identification time_allocation; do
+# for task_name in action_classification commentary_generation fouls_penalties offside_judgement player_identification space_identification time_allocation causal_inference; do
 for task_name in causal_inference; do
     echo "${task_name}"
 
@@ -27,7 +27,9 @@ for task_name in causal_inference; do
         --question-file "${EVAL_DATA_DIR}/json" \
         --output-file "${output_folder}/1_0.jsonl" \
         --keyframe-mode "${keyframe_mode}" \
-        --fps "${fps}"
+        --fps "${fps}" \
+        --num-workers 0 \
+        --resume
 
     > "${output_file}"
     cat "${output_folder}/1_0.jsonl" >> "${output_file}"

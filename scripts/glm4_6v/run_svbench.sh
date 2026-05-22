@@ -12,8 +12,8 @@ method=Uniform
 mkdir -p "${OUTPUT_DIR}"
 
 echo '-----------' >> "${OUTPUT_DIR}/${logname}"
-# for task_name in action_classification commentary_generation fouls_penalties offside_judgement player_identification space_identification time_allocation; do
-for task_name in action_classification; do
+# for task_name in action_classification commentary_generation fouls_penalties offside_judgement player_identification space_identification time_allocation causal_inference; do
+for task_name in causal_inference; do
     echo "${task_name}"
 
     output_folder=${OUTPUT_DIR}/glm4_6v/SVBench/${task_name}/answers/${method}

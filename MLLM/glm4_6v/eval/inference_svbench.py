@@ -3,6 +3,7 @@
 import argparse
 import json
 import os
+import re
 import sys
 
 from torch.utils.data import Dataset, DataLoader
@@ -152,6 +153,9 @@ def build_svbench_eval(args, task_name):
     return DataLoader(dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers, collate_fn=collate_fn)
 
 
+def clean_option_prefix(output):
+    return re.sub(r'^\s*\(O\d+\)\s*', '', output).strip()
+
 def run_inference(args):
     setup_seed(43)
     disable_torch_init()
@@ -164,6 +168,7 @@ def run_inference(args):
     ans_file = open(answer_file, "w")
 
     for i, (messages, questions, question_ids, answers) in enumerate(tqdm(val_loader)):
+        # import ipdb; ipdb.set_trace()
         messages = messages[0]
         question = questions[0]
         question_id = question_ids[0]
@@ -178,8 +183,7 @@ def run_inference(args):
             video_id=question_id,
             max_new_tokens=max(len(answer.split(' ')) * 2, 32),
         )
-        if output.find(')') > -1:
-            output = output[output.index(')') + 1:].strip()
+        output = clean_option_prefix(output)
         clean_cache(model)
 
         ans_file.write(json.dumps({'id': question_id, 'question': question, 'answer': answer, 'pred': output}) + '\n')

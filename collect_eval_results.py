@@ -2,20 +2,23 @@
 """Collect `Rouge-L f` and `str_match` from eval_result.json files.
 
 Usage:
-  python collect_eval_results.py  # uses default SVBench path
+  python collect_eval_results.py  # collects qwen3_vl and glm4_6v results
+  python collect_eval_results.py --model glm4_6v
+  python collect_eval_results.py --models qwen3_vl glm4_6v
   python collect_eval_results.py --base /path/to/SVBench
 
 The script searches for files matching
     <base>/*/answers/*/eval_result.json
-and writes two paper-style wide tables with methods on rows and tasks on columns:
-one table for `Rouge-L f`, one table for `str_match`. Each table also includes
-the mean over all QA metrics and the average of subtask metrics.
+and writes two paper-style wide tables with model_method on rows and tasks on
+columns: one table for `Rouge-L f`, one table for `str_match`. Each table also
+includes the mean over all QA metrics and the average of subtask metrics.
 """
 import os
 import json
 import argparse
 import csv
 import glob
+import math
 import sys
 
 
@@ -27,9 +30,15 @@ TASK_ORDER = [
     'player_identification',
     'space_identification',
     'time_allocation',
+    'causal_inference',
 ]
 
-METHOD_ORDER = ['fps_1.0', 'Uniform_32', 'ASK_32', 'FOCUS_32', 'KFC_32']
+METHOD_ORDER = ['Uniform', 'fps_1.0', 'Uniform_32', 'ASK_32', 'FOCUS_32', 'KFC_32']
+MODEL_ORDER = ['qwen3_vl', 'glm4_6v']
+MODEL_ALIASES = {
+    'qwen3_vl': 'qwen3vl',
+    'glm4_6v': 'glm4_6v',
+}
 
 
 def find_eval_files(base_dir):
@@ -41,7 +50,10 @@ def to_float(value):
     try:
         if value is None:
             return None
-        return float(value)
+        value = float(value)
+        if not math.isfinite(value):
+            return None
+        return value
     except (TypeError, ValueError):
         return None
 
@@ -112,32 +124,44 @@ def print_table(headers, rows):
         print(fmt.format(*row))
 
 
-def build_metric_tables(files, base_dir):
+def row_name(model, method):
+    model_name = MODEL_ALIASES.get(model, model)
+    return f'{model_name}_{method}' if model_name else method
+
+
+def build_metric_tables(sources):
     records = {}
-    methods = []
+    rows = []
     tasks = []
 
-    for fp in files:
-        metrics = read_metrics(fp)
-        rel = os.path.relpath(fp, base_dir)
-        parts = rel.split(os.sep)
-        if len(parts) < 4:
-            continue
+    for model, base_dir, files in sources:
+        for fp in files:
+            metrics = read_metrics(fp)
+            rel = os.path.relpath(fp, base_dir)
+            parts = rel.split(os.sep)
+            if len(parts) < 4:
+                continue
 
-        task = parts[0]
-        method = parts[2]
+            task = parts[0]
+            method = parts[2]
+            label = row_name(model, method)
 
-        if method not in methods:
-            methods.append(method)
-        if task not in tasks:
-            tasks.append(task)
+            if label not in rows:
+                rows.append(label)
+            if task not in tasks:
+                tasks.append(task)
 
-        records.setdefault(method, {})[task] = metrics
+            records.setdefault(label, {})[task] = metrics
 
-    ordered_methods = [
-        method for method in METHOD_ORDER if method in records
+    preferred_rows = [
+        row_name(model, method)
+        for model in MODEL_ORDER
+        for method in METHOD_ORDER
+    ]
+    ordered_rows = [
+        label for label in preferred_rows if label in records
     ] + [
-        method for method in methods if method not in METHOD_ORDER
+        label for label in rows if label not in preferred_rows
     ]
     ordered_tasks = [
         task for task in TASK_ORDER if task in tasks
@@ -147,10 +171,10 @@ def build_metric_tables(files, base_dir):
 
     rouge_rows = []
     sm_rows = []
-    for method in ordered_methods:
-        rouge_row = [method]
-        sm_row = [method]
-        method_records = records.get(method, {})
+    for label in ordered_rows:
+        rouge_row = [label]
+        sm_row = [label]
+        method_records = records.get(label, {})
         task_rouges = []
         task_str_matches = []
         benchmark_rouges = []
@@ -185,31 +209,54 @@ def build_metric_tables(files, base_dir):
     return headers, rouge_rows, sm_rows
 
 
-def main():
-    default_base = os.path.join(
-        'eval_output', 'qwen3_vl', 'SVBench'
-    )
+def resolve_sources(args):
+    if args.model:
+        models = [args.model]
+    else:
+        models = args.models
 
+    if args.base:
+        model = models[0] if models else ''
+        return [(model, args.base, sorted(find_eval_files(args.base)))]
+
+    sources = []
+    for model in models:
+        base = os.path.join('eval_output', model, 'SVBench')
+        if not os.path.isdir(base):
+            print('Base directory not found:', base, file=sys.stderr)
+            continue
+        sources.append((model, base, sorted(find_eval_files(base))))
+    return sources
+
+
+def main():
     p = argparse.ArgumentParser()
-    p.add_argument('--base', default=default_base, help='SVBench base directory')
+    p.add_argument('--model', default=None, choices=MODEL_ORDER, help='Collect one model output directory under eval_output')
+    p.add_argument('--models', nargs='+', default=MODEL_ORDER, choices=MODEL_ORDER, help='Model output directories under eval_output')
+    p.add_argument('--base', default=None, help='Single SVBench base directory')
     p.add_argument('--out-rouge', default=None, help='Rouge-L f CSV output path')
     p.add_argument('--out-str', default=None, help='str_match CSV output path')
     p.add_argument('--no-print', action='store_true', help='Do not pretty-print the table')
     args = p.parse_args()
 
-    base = args.base
-    if not os.path.isdir(base):
-        print('Base directory not found:', base, file=sys.stderr)
+    sources = resolve_sources(args)
+    if not sources:
+        print('No eval_result.json files found.', file=sys.stderr)
         sys.exit(2)
 
     if args.out_rouge is None:
-        args.out_rouge = os.path.join(base, 'eval_summary_rouge.csv')
+        out_dir = args.base or os.path.join('eval_output', 'SVBench')
+        args.out_rouge = os.path.join(out_dir, 'eval_summary_rouge.csv')
     if args.out_str is None:
-        args.out_str = os.path.join(base, 'eval_summary_str_match.csv')
+        out_dir = args.base or os.path.join('eval_output', 'SVBench')
+        args.out_str = os.path.join(out_dir, 'eval_summary_str_match.csv')
 
-    files = find_eval_files(base)
-    files.sort()
-    headers, rouge_rows, sm_rows = build_metric_tables(files, base)
+    out_dirs = {os.path.dirname(args.out_rouge), os.path.dirname(args.out_str)}
+    for out_dir in out_dirs:
+        if out_dir:
+            os.makedirs(out_dir, exist_ok=True)
+
+    headers, rouge_rows, sm_rows = build_metric_tables(sources)
 
     write_csv(headers, rouge_rows, args.out_rouge)
     write_csv(headers, sm_rows, args.out_str)

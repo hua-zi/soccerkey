@@ -13,7 +13,7 @@ mkdir -p "${OUTPUT_DIR}"
 
 echo '-----------' >> "${OUTPUT_DIR}/${logname}"
 # for task_name in action_classification commentary_generation fouls_penalties offside_judgement player_identification space_identification time_allocation; do
-for task_name in time_allocation; do
+for task_name in commentary_generation; do
     echo "${task_name}"
 
     output_folder=${OUTPUT_DIR}/qwen3_vl/SVBench/${task_name}/answers/${keyframe_mode}
