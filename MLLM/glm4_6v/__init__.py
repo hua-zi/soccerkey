@@ -42,7 +42,7 @@ def mm_infer(messages, model, processor, modal='video', video_id=None, save_atte
         return_tensors="pt",
     ).to(model.device)
     inputs.pop("token_type_ids", None)
-    import ipdb; ipdb.set_trace()
+    # import ipdb; ipdb.set_trace()
     # print(inputs.)
 
     max_new_tokens = kwargs.get('max_new_tokens', 2048)
