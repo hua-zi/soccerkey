@@ -2,9 +2,9 @@
 """Collect `Rouge-L f` and `str_match` from eval_result.json files.
 
 Usage:
-  python collect_eval_results.py  # collects qwen3_vl and glm4_6v results
+  python collect_eval_results.py  # collects qwen3_vl, glm4_6v, and internvl3_5 results
   python collect_eval_results.py --model glm4_6v
-  python collect_eval_results.py --models qwen3_vl glm4_6v
+  python collect_eval_results.py --models qwen3_vl glm4_6v internvl3_5
   python collect_eval_results.py --base /path/to/SVBench
 
 The script searches for files matching
@@ -34,10 +34,11 @@ TASK_ORDER = [
 ]
 
 METHOD_ORDER = ['Uniform', 'fps_1.0', 'Uniform_32', 'ASK_32', 'FOCUS_32', 'KFC_32']
-MODEL_ORDER = ['qwen3_vl', 'glm4_6v']
+MODEL_ORDER = ['qwen3_vl', 'glm4_6v', 'internvl3_5']
 MODEL_ALIASES = {
     'qwen3_vl': 'qwen3vl',
     'glm4_6v': 'glm4_6v',
+    'internvl3_5': 'internvl3_5',
 }
 
 
