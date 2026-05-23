@@ -357,8 +357,8 @@ def run_inference(args):
             cfg=cfg,
             max_tokens=max(len(answer.split(' ')) * 2, 32),
         )
-        print(i, prompt)
-        print("Answer:", output)
+        # print(i, prompt)
+        # print("Answer:", output)
         output = clean_option_prefix(output)
 
         ans_file.write(json.dumps({'id': question_id, 'question': question, 'answer': answer, 'pred': output}) + '\n')

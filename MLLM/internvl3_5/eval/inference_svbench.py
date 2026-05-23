@@ -2,7 +2,6 @@
 
 import argparse
 import contextlib
-import hashlib
 import io
 import json
 import os
@@ -23,7 +22,7 @@ sys.path.append('./MLLM')
 from utils import setup_seed, disable_torch_init
 
 
-DEFAULT_DATA_ROOT = "/home/zhonghua/softwares/data/sv_bench"
+DEFAULT_DATA_ROOT = "softlink/data/sv_bench"
 
 tasks = {
     "action_classification": ("action_classification.json",),
@@ -42,6 +41,7 @@ class RuntimeConfig:
     fps: float = 1.0
     resize_for_memory: bool = True
     restore_dir: str = "restore"
+    task_name: str = ""
 
 
 def collate_fn(batch):
@@ -57,9 +57,9 @@ class SVBenchDataset(Dataset):
     def __init__(self, data_list):
         self.data_list = data_list
         self.instruction = """
-            You are a football expert. You are given a question Q and multiple answer options labeled O1, O2, O3, O4, ....
+            You are a football expert. You are given a question Q and multiple answer options.
             Select the single option that best answers the question.
-            Output only the content of the chosen option, not the option label (e.g., do not output "O1").
+            Output only the content of the chosen option.
             Do not include any other text or explanation.
         """.strip()
 
@@ -73,8 +73,8 @@ class SVBenchDataset(Dataset):
         options = get_options(data)
 
         options_string = ''
-        for option_key, option_value in options:
-            options_string += f"({option_key}) {option_value}\n"
+        for _, option_value in options:
+            options_string += f"- {option_value}\n"
 
         prompt = f"Question: {question}\nOptions:\n{options_string}"
 
@@ -179,7 +179,9 @@ def load_done_ids(output_file):
 
 
 def clean_option_prefix(output):
-    return re.sub(r'^\s*\(O\d+\)\s*', '', output).strip()
+    output = re.sub(r'\s*</answer>\s*$', '', output).strip()
+    output = re.sub(r'^\s*\(O\d+\)\s*', '', output).strip()
+    return re.sub(r'^\s*(?:\([A-Z]+\)|[A-Z][\.\:：、])\s*', '', output).strip()
 
 
 def sample_frame_indices(total_frames: int, video_fps: float, sample_fps: float) -> List[int]:
@@ -195,16 +197,9 @@ def sample_frame_indices(total_frames: int, video_fps: float, sample_fps: float)
     return [min(max(i, 0), total_frames - 1) for i in indices]
 
 
-def sampling_cache_tag(cfg: RuntimeConfig) -> str:
-    fps_tag = str(cfg.fps).replace(".", "_")
-    return f"fps{fps_tag}"
-
-
 def video_cache_dir(video_path: str, cfg: RuntimeConfig) -> str:
-    abs_path = os.path.abspath(video_path)
     video_name = os.path.splitext(os.path.basename(video_path))[0]
-    path_hash = hashlib.md5(abs_path.encode("utf-8")).hexdigest()[:10]
-    return os.path.abspath(os.path.join(cfg.restore_dir, sampling_cache_tag(cfg), f"{video_name}_{path_hash}"))
+    return os.path.abspath(os.path.join(cfg.restore_dir, cfg.task_name, video_name))
 
 
 def load_cached_frames(save_dir: str) -> Tuple[str, List[float]] | None:
@@ -303,9 +298,9 @@ def ask_mllm(
     max_tokens: int,
 ) -> str:
     instruction = """
-        You are a football expert. You are given a question Q and multiple answer options labeled O1, O2, O3, O4, ....
+        You are a football expert. You are given a question Q and multiple answer options.
         Select the single option that best answers the question.
-        Output only the content of the chosen option, not the option label (e.g., do not output "O1").
+        Output only the content of the chosen option.
         Do not include any other text or explanation.
     """.strip()
 
@@ -324,7 +319,8 @@ def ask_mllm(
 
 def get_model_id(model_path: str | None) -> str:
     if model_path:
-        return os.path.abspath(os.path.expanduser(model_path))
+        # return os.path.abspath(os.path.expanduser(model_path))
+        return model_path
     raise RuntimeError("Please pass --model-path. It is also used as the OpenAI-compatible model id.")
 
 
@@ -346,6 +342,7 @@ def run_inference(args):
         fps=args.fps,
         resize_for_memory=args.resize_for_memory,
         restore_dir=args.restore_dir,
+        task_name=args.task_name,
     )
 
     os.makedirs(os.path.dirname(args.output_file), exist_ok=True)
@@ -368,6 +365,8 @@ def run_inference(args):
             cfg=cfg,
             max_tokens=max(len(answer.split(' ')) * 2, 32),
         )
+        # print(i, prompt)
+        # print("Answer:", output)
         output = clean_option_prefix(output)
         
         ans_file.write(json.dumps({'id': question_id, 'question': question, 'answer': answer, 'pred': output}) + '\n')

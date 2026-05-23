@@ -1,6 +1,7 @@
 EVAL_DATA_DIR=/home/zhonghua/softwares/data/sv_bench
 OUTPUT_DIR=eval_output
-MODEL_PATH=$(realpath "softlink/hf_model/OpenGVLab/InternVL3_5-8B")
+# MODEL_PATH=$(realpath "softlink/hf_model/OpenGVLab/InternVL3_5-8B")
+MODEL_PATH="softlink/hf_model/OpenGVLab/InternVL3_5-8B"
 BASE_URL=http://0.0.0.0:23333/v1
 RESTORE_DIR=/home/zhonghua/hua_ws/code/soccerkey/restore
 
@@ -15,8 +16,8 @@ mkdir -p "${OUTPUT_DIR}" "${RESTORE_DIR}"
 
 echo '-----------' >> "${OUTPUT_DIR}/${logname}"
 # for task_name in action_classification commentary_generation fouls_penalties offside_judgement player_identification space_identification time_allocation causal_inference; do
-for task_name in action_classification commentary_generation fouls_penalties offside_judgement; do
-# for task_name in causal_inference; do
+# for task_name in action_classification commentary_generation fouls_penalties offside_judgement; do
+for task_name in causal_inference; do
     echo "${task_name}"
 
     output_folder=${OUTPUT_DIR}/internvl3_5/SVBench/${task_name}/answers/${keyframe_mode}
