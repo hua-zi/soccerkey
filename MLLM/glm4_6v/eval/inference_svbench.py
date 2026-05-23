@@ -1,17 +1,23 @@
-"""Run GLM-4.6V inference on SVBench with 1 FPS video sampling."""
+"""Run GLM-4.6V inference on SVBench through transformers serve's OpenAI API."""
 
 import argparse
+import contextlib
+import io
 import json
 import os
 import re
 import sys
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Sequence, Tuple
 
-from torch.utils.data import Dataset, DataLoader
+from PIL import Image
+from decord import VideoReader, cpu
+from openai import OpenAI
+from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
 sys.path.append('./')
 sys.path.append('./MLLM')
-from glm4_6v import model_init, mm_infer, clean_cache
 from utils import setup_seed, disable_torch_init
 
 
@@ -29,23 +35,29 @@ tasks = {
 }
 
 
+@dataclass
+class RuntimeConfig:
+    fps: float = 1.0
+    restore_dir: str = "restore/glm4_6v"
+    task_name: str = ""
+
+
 def collate_fn(batch):
-    aud_vid  = [x['messages'] for x in batch]
-    qus  = [x['question'] for x in batch]
-    qid  = [x['question_id'] for x in batch]
-    ans  = [x['answer'] for x in batch]
-    return aud_vid, qus, qid, ans
+    video_paths = [x['video_paths'] for x in batch]
+    prompts = [x['prompt'] for x in batch]
+    questions = [x['question'] for x in batch]
+    question_ids = [x['question_id'] for x in batch]
+    answers = [x['answer'] for x in batch]
+    return video_paths, prompts, questions, question_ids, answers
 
 
 class SVBenchDataset(Dataset):
-
-    def __init__(self, data_list, fps=1.0):
+    def __init__(self, data_list):
         self.data_list = data_list
-        self.fps = fps
         self.instruction = """
-            You are a football expert. You are given a question Q and multiple answer options labeled O1, O2, O3, O4, ....
+            You are a football expert. You are given a question Q and multiple answer options.
             Select the single option that best answers the question.
-            Output only the content of the chosen option, not the option label (e.g., do not output “O1”).
+            Output only the content of the chosen option.
             Do not include any other text or explanation.
         """.strip()
 
@@ -55,34 +67,21 @@ class SVBenchDataset(Dataset):
     def __getitem__(self, idx):
         item = self.data_list[idx]
         data = item['data']
-        video_paths = get_video_paths(data, item['prefix'])
-        video_name = data['video_name']
         question = data['Q']
         options = get_options(data)
-        answer = data['openA']
-        question_id = video_name
 
         options_string = ''
-        for option_key, option_value in options:
-            options_string += f"({option_key}) {option_value}\n"
+        for _, option_value in options:
+            options_string += f"- {option_value}\n"
 
-        instruct = f'Question: {question}\nOptions:\n{options_string}'
-        messages = [
-            {"role": "system", "content": [{"type": "text", "text": self.instruction}]},
-            {
-                "role": "user",
-                "content": [
-                    *[build_video_content(video_path, self.fps) for video_path in video_paths],
-                    {"type": "text", "text": instruct},
-                ],
-            },
-        ]
+        prompt = f"Question: {question}\nOptions:\n{options_string}"
 
         return {
-            'messages': messages,
+            'video_paths': get_video_paths(data, item['prefix']),
+            'prompt': prompt,
             'question': question,
-            'question_id': question_id,
-            'answer': answer
+            'question_id': data['video_name'],
+            'answer': data['openA'],
         }
 
 
@@ -90,14 +89,6 @@ def resolve_path(path, base_dir):
     if os.path.isabs(path):
         return path
     return os.path.normpath(os.path.join(base_dir, path))
-
-
-def build_video_content(video_path, fps):
-    return {
-        "type": "video",
-        "video": video_path,
-        "fps": fps,
-    }
 
 
 def get_video_paths(data, base_dir):
@@ -135,18 +126,17 @@ def load_svbench_json(json_file):
 
 def build_svbench_eval(args, task_name, done_ids=None):
     done_ids = done_ids or set()
-    data_list = []
-    # for task_name, task in tasks.items():
     task = tasks[task_name]
     question_dir = args.question_file
     if os.path.isdir(os.path.join(question_dir, "json")):
         question_dir = os.path.join(question_dir, "json")
+
     json_file = os.path.join(question_dir, task[0])
     vis_folder = os.path.dirname(json_file)
     json_data = load_svbench_json(json_file)
-    for i, data in enumerate(json_data):
-        # if i == 3:
-        #     break
+
+    data_list = []
+    for data in json_data:
         if data.get('video_name') in done_ids:
             continue
         data_list.append({
@@ -154,12 +144,17 @@ def build_svbench_eval(args, task_name, done_ids=None):
             'prefix': vis_folder,
             'data_type': 'video',
             'bound': None,
-            'data': data
+            'data': data,
         })
-    dataset = SVBenchDataset(data_list, fps=args.fps)
-    dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers, collate_fn=collate_fn)
 
-    return dataloader
+    dataset = SVBenchDataset(data_list)
+    return DataLoader(
+        dataset,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=args.num_workers,
+        collate_fn=collate_fn,
+    )
 
 
 def load_done_ids(output_file):
@@ -182,28 +177,145 @@ def load_done_ids(output_file):
 
 
 def clean_option_prefix(output):
-    return re.sub(r'^\s*\(O\d+\)\s*', '', output).strip()
+    output = re.sub(r'\s*</answer>\s*$', '', output).strip()
+    output = re.sub(r'^\s*\(O\d+\)\s*', '', output).strip()
+    return re.sub(r'^\s*(?:\([A-Z]+\)|[A-Z][\.\:：、])\s*', '', output).strip()
 
 
-def load_include_frame_idx(args, keyframe_mode, nframes=32):
-    if keyframe_mode == 'Uniform':
+def sample_frame_indices(total_frames: int, video_fps: float, sample_fps: float) -> List[int]:
+    if total_frames <= 0:
+        return []
+
+    if sample_fps and sample_fps > 0 and video_fps and video_fps > 0:
+        step = max(int(round(video_fps / sample_fps)), 1)
+        indices = list(range(0, total_frames, step))
+    else:
+        indices = list(range(total_frames))
+
+    return [min(max(i, 0), total_frames - 1) for i in indices]
+
+
+def video_cache_dir(video_path: str, cfg: RuntimeConfig) -> str:
+    video_name = os.path.splitext(os.path.basename(video_path))[0]
+    return os.path.abspath(os.path.join(cfg.restore_dir, cfg.task_name, video_name))
+
+
+def load_cached_frames(save_dir: str) -> Optional[Tuple[str, List[float]]]:
+    manifest_path = os.path.join(save_dir, "manifest.json")
+    if not os.path.exists(manifest_path):
         return None
-    elif keyframe_mode == 'ASK':
-        file_path = f'./frame_idx/longvideobench/AKS/frame_idx_{nframes}.json'
-    elif keyframe_mode == 'KFC':
-        file_path = f'./frame_idx/longvideobench/KFC/frame_idx_{nframes}_15_{args.threshold}.json'
-    elif keyframe_mode == 'FOCUS':
-        file_path = f'./frame_idx/longvideobench/FOCUS/frame_idx_{nframes}.json'
-    elif keyframe_mode == 'KFCblip2':
-        file_path = f'./frame_idx/longvideobench/KFCblip2/frame_idx_{nframes}_15_{args.threshold}.json'
-    with open(file_path, 'r') as f:
-        data = json.load(f)
-    include_frame_idx_dict = {}
-    for item in data:
-        video_id = item['id']
-        frame_idx = item['frame_idx']
-        include_frame_idx_dict[video_id] = frame_idx
-    return include_frame_idx_dict
+
+    try:
+        with open(manifest_path, "r", encoding="utf-8") as f:
+            manifest = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return None
+
+    frame_files = manifest.get("frame_files") or []
+    timestamps = manifest.get("timestamps") or []
+    if len(frame_files) != len(timestamps) or not frame_files:
+        return None
+
+    if all(os.path.exists(os.path.join(save_dir, frame_file)) for frame_file in frame_files):
+        return save_dir, timestamps
+    return None
+
+
+def save_video_frames(video_path: str, video_idx: int, cfg: RuntimeConfig) -> Tuple[str, List[float]]:
+    save_dir = video_cache_dir(video_path, cfg)
+    cached = load_cached_frames(save_dir)
+    if cached is not None:
+        return cached
+
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        vr = VideoReader(video_path, ctx=cpu(0))
+
+    total_frames = len(vr)
+    video_fps = float(vr.get_avg_fps())
+    frame_indices = sample_frame_indices(total_frames, video_fps, cfg.fps)
+    if not frame_indices:
+        raise ValueError(f"No frames sampled from video: {video_path}")
+
+    os.makedirs(save_dir, exist_ok=True)
+
+    frames = vr.get_batch(frame_indices).asnumpy()
+    frame_files = []
+    for i, frame in enumerate(frames):
+        frame_file = f"{i:06d}.jpg"
+        img = Image.fromarray(frame.astype("uint8")).convert("RGB")
+        img.save(os.path.join(save_dir, frame_file))
+        frame_files.append(frame_file)
+
+    timestamps = [idx / video_fps if video_fps > 0 else float(idx) for idx in frame_indices]
+    manifest = {
+        "video_path": os.path.abspath(video_path),
+        "fps": cfg.fps,
+        "video_fps": video_fps,
+        "frame_indices": frame_indices,
+        "timestamps": timestamps,
+        "frame_files": frame_files,
+    }
+    with open(os.path.join(save_dir, "manifest.json"), "w", encoding="utf-8") as f:
+        json.dump(manifest, f, indent=2)
+
+    return save_dir, timestamps
+
+
+def build_openai_content(video_paths: Sequence[str], prompt: str, cfg: RuntimeConfig) -> List[Dict]:
+    content: List[Dict] = []
+    for video_idx, video_path in enumerate(video_paths):
+        frames_dir, timestamps = save_video_frames(video_path, video_idx, cfg)
+        video_title = "Original video" if len(video_paths) == 1 else f"Original video {video_idx + 1}"
+        content.append({"type": "text", "text": f"{video_title}:"})
+        for frame_idx, timestamp in enumerate(timestamps):
+            content.append({"type": "text", "text": f"Frame{frame_idx} ({timestamp:.1f}s):"})
+            content.append({
+                "type": "image_url",
+                "image_url": {"url": os.path.abspath(os.path.join(frames_dir, f"{frame_idx:06d}.jpg"))},
+            })
+
+    content.append({"type": "text", "text": prompt})
+    return content
+
+
+def ask_mllm(
+    client: OpenAI,
+    model_id: str,
+    video_paths: Sequence[str],
+    prompt: str,
+    cfg: RuntimeConfig,
+    max_tokens: int,
+) -> str:
+    instruction = """
+        You are a football expert. You are given a question Q and multiple answer options.
+        Select the single option that best answers the question.
+        Output only the content of the chosen option.
+        Do not include any other text or explanation.
+    """.strip()
+
+    messages = [
+        {"role": "system", "content": instruction},
+        {"role": "user", "content": build_openai_content(video_paths, prompt, cfg)},
+    ]
+    out = client.chat.completions.create(
+        model=model_id,
+        messages=messages,
+        temperature=0.0,
+        max_tokens=max_tokens,
+    )
+    return out.choices[0].message.content or ""
+
+
+def get_model_id(model_path: str | None) -> str:
+    if model_path:
+        return os.path.abspath(os.path.expanduser(model_path))
+    raise RuntimeError("Please pass --model-path. It is also used as the OpenAI-compatible model id.")
+
+
+def ensure_parent_dir(path: str):
+    parent = os.path.dirname(os.path.abspath(path))
+    if parent:
+        os.makedirs(parent, exist_ok=True)
 
 
 def run_inference(args):
@@ -214,42 +326,41 @@ def run_inference(args):
     done_ids = load_done_ids(answer_file) if args.resume else set()
     if done_ids:
         print(f'Resume enabled, skip {len(done_ids)} finished samples.')
-    
-    # 数据和模型
+
     val_loader = build_svbench_eval(args, args.task_name, done_ids=done_ids)
-    model, processor = model_init(args.model_path)
+    client = OpenAI(api_key=args.api_key, base_url=args.base_url)
+    model_id = get_model_id(args.model_path)
+    print(f'OpenAI-compatible model: {model_id}')
 
-    # 抽帧
-    include_frame_idx = load_include_frame_idx(args, keyframe_mode=args.keyframe_mode, nframes=args.nframes)
+    cfg = RuntimeConfig(
+        fps=args.fps,
+        restore_dir=args.restore_dir,
+        task_name=args.task_name,
+    )
 
-    # save answer
-    os.makedirs(os.path.dirname(args.output_file), exist_ok=True)
+    ensure_parent_dir(args.output_file)
     ans_file = open(answer_file, "a" if args.resume else "w", encoding='utf-8')
-    
-    # NOTE: only support batch size 1 for now
-    for i, (messages, questions, question_ids, answers) in enumerate(tqdm(val_loader)):
-        # if i < 7:
-        #     continue
-        messages     = messages[0]
-        question     = questions[0]
-        question_id  = question_ids[0]  # qjY9kmveQAk_0
-        answer       = answers[0]   # 'Ate the medicine.'
 
-        output = mm_infer(
-            messages, # dict_keys(['video', 'audio']):torch.Size([8, 3, 384, 384]),torch.Size([1, 2998, 128])
-            model=model,
-            processor=processor,
-            modal='video',
-            do_sample=False,
-            # save_attentions=True,
-            video_id=question_id,
-            max_new_tokens = max(len(answer.split(' ')) * 2, 32),
-            frame_idx=include_frame_idx[question_id] if include_frame_idx is not None else None,
-            nframes=len(include_frame_idx[question_id]) if include_frame_idx is not None else args.nframes,
+    # NOTE: only support batch size 1 for now
+    for i, (video_paths, prompts, questions, question_ids, answers) in enumerate(tqdm(val_loader)):
+        video_paths = video_paths[0]
+        prompt = prompts[0]
+        question = questions[0]
+        question_id = question_ids[0]
+        answer = answers[0]
+
+        output = ask_mllm(
+            client=client,
+            model_id=model_id,
+            video_paths=video_paths,
+            prompt=prompt,
+            cfg=cfg,
+            max_tokens=max(len(answer.split(' ')) * 2, 32),
         )
+        print(i, prompt)
+        print("Answer:", output)
         output = clean_option_prefix(output)
-        clean_cache(model)
-        # import ipdb; ipdb.set_trace()
+
         ans_file.write(json.dumps({'id': question_id, 'question': question, 'answer': answer, 'pred': output}) + '\n')
         ans_file.flush()
         # if i == 2:
@@ -257,23 +368,34 @@ def run_inference(args):
     ans_file.close()
 
 
+def str2bool(v):
+    if isinstance(v, bool):
+        return v
+    if v.lower() in ("yes", "true", "t", "y", "1"):
+        return True
+    if v.lower() in ("no", "false", "f", "n", "0"):
+        return False
+    raise argparse.ArgumentTypeError("Boolean value expected.")
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--model-path', help='', required=True)
+    parser.add_argument('--model-path', help='Model path. Also used as the OpenAI-compatible model id.', required=True)
+    parser.add_argument('--base-url', '--base_url', dest='base_url', type=str, default="http://localhost:8000/v1")
+    parser.add_argument('--api-key', type=str, default="EMPTY")
     parser.add_argument('--video-folder', help='SVBench root directory.', default=DEFAULT_DATA_ROOT)
     parser.add_argument('--question-file', help='Directory containing SVBench json files.', default=None)
     parser.add_argument('--answer-file', help='Path to the ground truth file containing answers.', default=None)
-    parser.add_argument('--output-file', help='Directory to save the model results JSON.', required=True)
+    parser.add_argument('--output-file', help='Path to save the model results JSONL.', required=True)
     parser.add_argument("--device", type=str, required=False, default='cuda:0')
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--num-workers", type=int, default=2)
     parser.add_argument("--resume", action='store_true', help='Append to output file and skip finished sample ids.')
-
     parser.add_argument("--task-name", type=str, required=True, default='action_classification', choices=list(tasks.keys()))
-    parser.add_argument("--keyframe-mode", type=str, required=False, default='Uniform', choices=['ASK', 'FOCUS', 'KFC', 'KFCblip2', 'Uniform'])
-    parser.add_argument("--nframes", type=int, required=False, default=32)
+    parser.add_argument("--keyframe-mode", type=str, required=False, default='Uniform', choices=['Uniform'])
     parser.add_argument("--fps", type=float, required=False, default=1.0)
-    parser.add_argument("--threshold", type=float, default=0.01)
+    parser.add_argument("--resize-for-memory", type=str2bool, nargs="?", const=True, default=True)
+    parser.add_argument("--restore-dir", type=str, default="restore/glm4_6v")
 
     args = parser.parse_args()
     if args.question_file is None:

@@ -1,17 +1,17 @@
 EVAL_DATA_DIR=/home/zhonghua/softwares/data/sv_bench
 OUTPUT_DIR=eval_output
-CKPT=softlink/hf_model/OpenGVLab/InternVL3_5-8B
+MODEL_PATH=$(realpath "softlink/hf_model/OpenGVLab/InternVL3_5-8B")
 BASE_URL=http://0.0.0.0:23333/v1
+RESTORE_DIR=/home/zhonghua/hua_ws/code/soccerkey/restore
 
 # conda activate soccer
-# CUDA_VISIBLE_DEVICES=0 lmdeploy serve api_server "${CKPT}" --server-port 23333
+# CUDA_VISIBLE_DEVICES=0 lmdeploy serve api_server "${MODEL_PATH}" --server-port 23333
 
 logname=internvl3_5_log.txt
 fps=1.0
 keyframe_mode=Uniform
-nframes=32
 
-mkdir -p "${OUTPUT_DIR}"
+mkdir -p "${OUTPUT_DIR}" "${RESTORE_DIR}"
 
 echo '-----------' >> "${OUTPUT_DIR}/${logname}"
 # for task_name in action_classification commentary_generation fouls_penalties offside_judgement player_identification space_identification time_allocation causal_inference; do
@@ -24,7 +24,7 @@ for task_name in action_classification commentary_generation fouls_penalties off
     mkdir -p "${output_folder}"
 
     TRANSFORMERS_OFFLINE=1 python3 -m MLLM.internvl3_5.eval.inference_svbench \
-        --model-path "${CKPT}" \
+        --model-path "${MODEL_PATH}" \
         --base-url "${BASE_URL}" \
         --task-name "${task_name}" \
         --video-folder "${EVAL_DATA_DIR}" \
@@ -32,13 +32,13 @@ for task_name in action_classification commentary_generation fouls_penalties off
         --output-file "${output_folder}/1_0.jsonl" \
         --keyframe-mode "${keyframe_mode}" \
         --fps "${fps}" \
-        --nframes "${nframes}" \
+        --restore-dir "${RESTORE_DIR}" \
         --num-workers 0 \
         # --resume
 
     > "${output_file}"
     cat "${output_folder}/1_0.jsonl" >> "${output_file}"
-    echo -n "task_name:${task_name} keyframe_mode:${keyframe_mode} fps:${fps} nframes:${nframes} " >> "${OUTPUT_DIR}/${logname}"
+    echo -n "task_name:${task_name} keyframe_mode:${keyframe_mode} fps:${fps} restore_dir:${RESTORE_DIR} " >> "${OUTPUT_DIR}/${logname}"
     python3 MLLM/internvl3_5/eval/eval_rouge.py \
         --pred-path "${output_file}" \
         --output-dir "${output_folder}/" \

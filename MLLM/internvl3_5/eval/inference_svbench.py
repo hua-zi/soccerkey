@@ -2,15 +2,15 @@
 
 import argparse
 import contextlib
+import hashlib
 import io
 import json
 import os
 import re
 import sys
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Sequence, Tuple
 
-import numpy as np
 from PIL import Image
 from decord import VideoReader, cpu
 from lmdeploy.vl.constants import IMAGE_TOKEN
@@ -40,10 +40,8 @@ tasks = {
 @dataclass
 class RuntimeConfig:
     fps: float = 1.0
-    nframes: Optional[int] = None
     resize_for_memory: bool = True
     restore_dir: str = "restore"
-    task_name: str = ""
 
 
 def collate_fn(batch):
@@ -184,7 +182,7 @@ def clean_option_prefix(output):
     return re.sub(r'^\s*\(O\d+\)\s*', '', output).strip()
 
 
-def sample_frame_indices(total_frames: int, video_fps: float, sample_fps: float, nframes: Optional[int]) -> List[int]:
+def sample_frame_indices(total_frames: int, video_fps: float, sample_fps: float) -> List[int]:
     if total_frames <= 0:
         return []
 
@@ -194,33 +192,79 @@ def sample_frame_indices(total_frames: int, video_fps: float, sample_fps: float,
     else:
         indices = list(range(total_frames))
 
-    if nframes and len(indices) > nframes:
-        selected = np.linspace(0, len(indices) - 1, nframes).round().astype(int)
-        indices = [indices[int(i)] for i in selected]
-
     return [min(max(i, 0), total_frames - 1) for i in indices]
 
 
+def sampling_cache_tag(cfg: RuntimeConfig) -> str:
+    fps_tag = str(cfg.fps).replace(".", "_")
+    return f"fps{fps_tag}"
+
+
+def video_cache_dir(video_path: str, cfg: RuntimeConfig) -> str:
+    abs_path = os.path.abspath(video_path)
+    video_name = os.path.splitext(os.path.basename(video_path))[0]
+    path_hash = hashlib.md5(abs_path.encode("utf-8")).hexdigest()[:10]
+    return os.path.abspath(os.path.join(cfg.restore_dir, sampling_cache_tag(cfg), f"{video_name}_{path_hash}"))
+
+
+def load_cached_frames(save_dir: str) -> Tuple[str, List[float]] | None:
+    manifest_path = os.path.join(save_dir, "manifest.json")
+    if not os.path.exists(manifest_path):
+        return None
+
+    try:
+        with open(manifest_path, "r", encoding="utf-8") as f:
+            manifest = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return None
+
+    frame_files = manifest.get("frame_files") or []
+    timestamps = manifest.get("timestamps") or []
+    if len(frame_files) != len(timestamps) or not frame_files:
+        return None
+
+    if all(os.path.exists(os.path.join(save_dir, frame_file)) for frame_file in frame_files):
+        return save_dir, timestamps
+    return None
+
+
 def save_video_frames(video_path: str, sample_id: str, video_idx: int, cfg: RuntimeConfig) -> Tuple[str, List[float]]:
+    save_dir = video_cache_dir(video_path, cfg)
+    cached = load_cached_frames(save_dir)
+    if cached is not None:
+        return cached
+
     with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
         vr = VideoReader(video_path, ctx=cpu(0))
 
     total_frames = len(vr)
     video_fps = float(vr.get_avg_fps())
-    frame_indices = sample_frame_indices(total_frames, video_fps, cfg.fps, cfg.nframes)
+    frame_indices = sample_frame_indices(total_frames, video_fps, cfg.fps)
     if not frame_indices:
         raise ValueError(f"No frames sampled from video: {video_path}")
 
-    video_name = os.path.splitext(os.path.basename(video_path))[0]
-    save_dir = os.path.abspath(os.path.join(cfg.restore_dir, cfg.task_name, video_name))
     os.makedirs(save_dir, exist_ok=True)
 
     frames = vr.get_batch(frame_indices).asnumpy()
+    frame_files = []
     for i, frame in enumerate(frames):
+        frame_file = f"{i:06d}.jpg"
         img = Image.fromarray(frame.astype("uint8")).convert("RGB")
-        img.save(os.path.join(save_dir, f"{i:06d}.jpg"))
+        img.save(os.path.join(save_dir, frame_file))
+        frame_files.append(frame_file)
 
     timestamps = [idx / video_fps if video_fps > 0 else float(idx) for idx in frame_indices]
+    manifest = {
+        "video_path": os.path.abspath(video_path),
+        "fps": cfg.fps,
+        "video_fps": video_fps,
+        "frame_indices": frame_indices,
+        "timestamps": timestamps,
+        "frame_files": frame_files,
+    }
+    with open(os.path.join(save_dir, "manifest.json"), "w", encoding="utf-8") as f:
+        json.dump(manifest, f, indent=2)
+
     return save_dir, timestamps
 
 
@@ -251,7 +295,7 @@ def build_openai_content(video_paths: Sequence[str], prompt: str, sample_id: str
 
 def ask_mllm(
     client: OpenAI,
-    model_name: str,
+    model_id: str,
     video_paths: Sequence[str],
     prompt: str,
     sample_id: str,
@@ -270,12 +314,18 @@ def ask_mllm(
         {"role": "user", "content": build_openai_content(video_paths, prompt, sample_id, cfg)},
     ]
     out = client.chat.completions.create(
-        model=model_name,
+        model=model_id,
         messages=messages,
         temperature=0.0,
         max_tokens=max_tokens,
     )
     return out.choices[0].message.content or ""
+
+
+def get_model_id(model_path: str | None) -> str:
+    if model_path:
+        return os.path.abspath(os.path.expanduser(model_path))
+    raise RuntimeError("Please pass --model-path. It is also used as the OpenAI-compatible model id.")
 
 
 def run_inference(args):
@@ -289,17 +339,13 @@ def run_inference(args):
 
     val_loader = build_svbench_eval(args, args.task_name, done_ids=done_ids)
     client = OpenAI(api_key=args.api_key, base_url=args.base_url)
-    model_name = args.model_name
-    if model_name is None:
-        model_name = client.models.list().data[0].id
-    print(f'OpenAI-compatible model: {model_name}')
+    model_id = get_model_id(args.model_path)
+    print(f'OpenAI-compatible model: {model_id}')
 
     cfg = RuntimeConfig(
         fps=args.fps,
-        nframes=args.nframes,
         resize_for_memory=args.resize_for_memory,
         restore_dir=args.restore_dir,
-        task_name=args.task_name,
     )
 
     os.makedirs(os.path.dirname(args.output_file), exist_ok=True)
@@ -315,7 +361,7 @@ def run_inference(args):
 
         output = ask_mllm(
             client=client,
-            model_name=model_name,
+            model_id=model_id,
             video_paths=video_paths,
             prompt=prompt,
             sample_id=question_id,
@@ -343,8 +389,7 @@ def str2bool(v):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--model-path', help='Kept for script compatibility; model is served by lmdeploy.', default=None)
-    parser.add_argument('--model-name', help='OpenAI model id. Defaults to the first model listed by the server.', default=None)
+    parser.add_argument('--model-path', help='Model path. Also used as the OpenAI-compatible model id.', required=True)
     parser.add_argument('--base-url', '--base_url', dest='base_url', type=str, default="http://0.0.0.0:23333/v1")
     parser.add_argument('--api-key', type=str, default="EMPTY")
     parser.add_argument('--video-folder', help='SVBench root directory.', default=DEFAULT_DATA_ROOT)
@@ -357,7 +402,6 @@ if __name__ == "__main__":
     parser.add_argument("--resume", action='store_true', help='Append to output file and skip finished sample ids.')
     parser.add_argument("--task-name", type=str, required=True, default='action_classification', choices=list(tasks.keys()))
     parser.add_argument("--keyframe-mode", type=str, required=False, default='Uniform', choices=['Uniform'])
-    parser.add_argument("--nframes", type=int, required=False, default=32)
     parser.add_argument("--fps", type=float, required=False, default=1.0)
     parser.add_argument("--resize-for-memory", type=str2bool, nargs="?", const=True, default=True)
     parser.add_argument("--restore-dir", type=str, default="restore")

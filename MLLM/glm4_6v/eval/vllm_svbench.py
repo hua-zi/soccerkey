@@ -1,4 +1,4 @@
-"""Backward-compatible entry point for InternVL3.5 SVBench inference."""
+"""Backward-compatible entry point for GLM-4.6V SVBench inference."""
 
 try:
     from .inference_svbench import run_inference
@@ -14,7 +14,7 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
     parser.add_argument('--model-path', required=True)
-    parser.add_argument('--base-url', '--base_url', dest='base_url', type=str, default="http://0.0.0.0:23333/v1")
+    parser.add_argument('--base-url', '--base_url', dest='base_url', type=str, default="http://localhost:8000/v1")
     parser.add_argument('--api-key', type=str, default="EMPTY")
     parser.add_argument('--video-folder', default=DEFAULT_DATA_ROOT)
     parser.add_argument('--question-file', default=None)
@@ -27,7 +27,7 @@ if __name__ == "__main__":
     parser.add_argument("--keyframe-mode", type=str, required=False, default='Uniform', choices=['Uniform'])
     parser.add_argument("--fps", type=float, required=False, default=1.0)
     parser.add_argument("--resize-for-memory", type=str2bool, nargs="?", const=True, default=True)
-    parser.add_argument("--restore-dir", type=str, default="restore/internvl3_5")
+    parser.add_argument("--restore-dir", type=str, default="restore/glm4_6v")
 
     args = parser.parse_args()
     if args.question_file is None:
